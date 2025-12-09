@@ -1,94 +1,152 @@
 import os
+import librosa
+import pretty_midi
+import numpy as np
+import matplotlib.pyplot as plt
+import scipy.signal
 
-def parse_corpus(corpus_path, wav_subfolder='wavfile', midi_subfolder='midfile', list_filename='query.list'):
+# prase files from the dataset
+def parse_dataset(corpus_full_path, midi_folder_name, wav_folder_name, query_list_name):
     """
-    Parses a QBSH corpus folder with flexible subfolder names.
-    
-    Args:
-        corpus_path (str): The root path to the corpus.
-        wav_subfolder (str): Name of the folder containing wav files (default: 'wavfile').
-        midi_subfolder (str): Name of the folder containing midi files (default: 'midfile').
-        list_filename (str): Name of the text file mapping queries to MIDI (default: 'query.list').
-                           
-    Returns:
-        list: A list of tuples, where each tuple is (wav_full_path, midi_full_path)
+    Parses the query list to find valid wav/MIDI pairs
+    Returns a list of dictionaries: [{'wav': path, 'mid': path, 'id': id}, ...]
     """
-    
-    # 1. Construct paths using the arguments
-    wav_dir = os.path.join(corpus_path, wav_subfolder)
-    midi_dir = os.path.join(corpus_path, midi_subfolder)
-    query_list_path = os.path.join(corpus_path, list_filename)
-    
-    dataset = []
 
-    # 2. Check if the list file exists
-    if not os.path.exists(query_list_path):
-        print(f"Error: Could not find query list at {query_list_path}")
+    query_path = os.path.join(corpus_full_path, query_list_name)
+    
+    if not os.path.exists(query_path):
+        print(f"ERROR: Could not find list at {query_path}")
         return []
 
-    print(f"Parsing corpus at: {corpus_path}...")
-
-    # 3. Read the mapping file
-    with open(query_list_path, 'r', encoding='utf-8', errors='ignore') as f:
+    print(f"Parsing list: {query_list_name}...")
+    dataset = []
+    
+    with open(query_path) as f:
         for line in f:
-            line = line.strip()
-            if not line:
-                continue 
-            
-            # Split the line. (Assumes format: "wav_filename   midi_id")
-            parts = line.split() 
-            
+            parts = line.strip().split()
             if len(parts) >= 2:
-                wav_name = parts[0]
+                
+                # clean wav paths
+                raw_wav_path = parts[0].replace('\\', '/')
+                wav_filename = raw_wav_path.split('/')[-1] 
+                
+                # clean midi id/filenmame
                 midi_id = parts[1]
-                
-                # 4. Handle Extensions logic (Robustness check)
-                if not wav_name.lower().endswith('.wav'):
-                    wav_name += '.wav'
-                
-                if not midi_id.lower().endswith('.mid'):
-                    midi_file_name = midi_id + '.mid'
+                if not midi_id.endswith('.mid'):
+                    midi_filename = f"{midi_id}.mid"
                 else:
-                    midi_file_name = midi_id
+                    midi_filename = midi_id
+                    midi_id = midi_id.replace('.mid', '')
 
-                # 5. Construct absolute paths
-                full_wav_path = os.path.join(wav_dir, wav_name)
-                full_midi_path = os.path.join(midi_dir, midi_file_name)
-
-                # 6. Verify files exist
-                if os.path.exists(full_wav_path) and os.path.exists(full_midi_path):
-                    dataset.append((full_wav_path, full_midi_path))
-                # else:
-                #     print(f"Warning: File not found for pair: {wav_name} <-> {midi_file_name}")
-
-    print(f"Successfully loaded {len(dataset)} pairs from {corpus_path}")
+                # make full paths
+                full_wav = os.path.join(corpus_full_path, wav_folder_name, wav_filename)
+                full_mid = os.path.join(corpus_full_path, midi_folder_name, midi_filename)
+                
+                # only add if both paths exist
+                if os.path.exists(full_wav) and os.path.exists(full_mid):
+                    dataset.append({
+                        'wav': full_wav,
+                        'mid': full_mid,
+                        'id': midi_id
+                    })
+    
+    print(f"Found {len(dataset)} valid pairs.")
     return dataset
 
-# --- Main Execution ---
+# audio feature extraction 
+def extract_audio_f0(audio_path):
+    print(f"Loading Audio: {os.path.basename(audio_path)}...", flush=True)
+    # Using sr=None (uses 8k)
+    y, sr = librosa.load(audio_path, sr=None)
+    
+    print(f"Extracting Audio Pitch (pYIN)...", flush=True)
+    f0, voiced_flag, voiced_probs = librosa.pyin(y, sr=sr,
+                                                 fmin=librosa.note_to_hz('C2'), 
+                                                 fmax=librosa.note_to_hz('C5'))
+    if f0 is not None:
+        f0 = scipy.signal.medfilt(f0, kernel_size=5)
 
-if __name__ == "__main__":
-    # --- 1. Parse IOACAS Corpus (Uses the defaults) ---
-    path_ioacas = os.path.join("IOACAS_QBH_Corpus", "IOACAS_pt1")
-    dataset_ioacas = parse_corpus(path_ioacas) 
-    # Defaults used: wav_subfolder='wavfile', midi_subfolder='midfile'
+    return f0, sr, y
+    return f0, sr, y
 
-    
-    # --- 2. Parse ThinkIT Corpus (Overrides the defaults) ---
-    # Assuming the folder is named 'ThinkIT_Corpus' inside your 'Final' folder
-    path_thinkit = "ThinkIT_Corpus" 
-    
-    dataset_thinkit = parse_corpus(
-        path_thinkit, 
-        wav_subfolder='Query',      # Matches ThinkIT structure
-        midi_subfolder='REFMIDI',   # Matches ThinkIT structure
-        list_filename='query.list'  # Matches ThinkIT structure
-    )
+# MIDI extraction
+def extract_midi_f0(midi_path, target_sr, hop_length=512):
+    """
+    Extracts pitch from MIDI but formats it to look exactly like the Audio F0.
+    target_sr: Must match the sample rate of the audio file for alignment.
+    """
+    print(f"Loading MIDI: {os.path.basename(midi_path)}...", flush=True)
+    try:
+        pm = pretty_midi.PrettyMIDI(midi_path)
+    except Exception as e:
+        print(f"Failed to load MIDI: {e}")
+        return None, None
 
-    # --- 3. Combine them for your experiment ---
-    full_dataset = dataset_ioacas + dataset_thinkit
+    # calculate length in frames
+    total_time = pm.get_end_time()
+    n_frames = int(total_time * target_sr / hop_length) + 1
     
-    print(f"\nTotal items in combined dataset: {len(full_dataset)}")
+    # construct arrays 
+    times = np.arange(n_frames) * hop_length / target_sr
+    f0_midi = np.full(n_frames, np.nan)
     
-    if len(full_dataset) > 0:
-        print("Example pair from combined set:")
-        print(full_dataset[-1]) # Prints an item from the ThinkIT set
+    # extraxt notes
+    if len(pm.instruments) > 0:
+        instrument = pm.instruments[0]
+        for note in instrument.notes:
+            # map time to frames array
+            start_frame = int(note.start * target_sr / hop_length)
+            end_frame = int(note.end * target_sr / hop_length)
+            
+            # pitch to frequency
+            freq = librosa.midi_to_hz(note.pitch)
+            
+            # Fpopulate array
+            end_frame = min(end_frame, n_frames)
+            f0_midi[start_frame:end_frame] = freq
+            
+    return f0_midi, times
+
+
+# MAIN
+# set directory
+base_dir = os.path.abspath(os.path.join(os.getcwd(), 'QBSH_Final', 'IOACAS_QBH_Corpus', 'IOACAS_pt1'))
+
+# parse data
+pairs = parse_dataset(base_dir, 'midfile', 'wavfile', 'query.list')
+
+if len(pairs) > 0:
+    # pick the 1st pair to analyze
+    target_pair = pairs[0] 
+    
+    # run analysis
+    a_f0, a_sr, a_y = extract_audio_f0(target_pair['wav'])
+    
+    # B. get midi data (with matching sr)
+    m_f0, m_times = extract_midi_f0(target_pair['mid'], target_sr=a_sr)
+
+    # Plot comparison
+    plt.figure(figsize=(12, 8))
+    
+    # Plot Audio
+    plt.subplot(2, 1, 1)
+    a_times = librosa.times_like(a_f0, sr=a_sr)
+    plt.plot(a_times, a_f0, color='red', label='Humming (Audio)')
+    plt.title(f"Query: {os.path.basename(target_pair['wav'])}")
+    plt.ylabel("Frequency (Hz)")
+    plt.legend()
+    
+    # Plot MIDI
+    plt.subplot(2, 1, 2)
+    plt.plot(m_times, m_f0, color='green', linewidth=2, label='Ground Truth (MIDI)')
+    plt.title(f"Target: {os.path.basename(target_pair['mid'])}")
+    plt.ylabel("Frequency (Hz)")
+    plt.xlabel("Time (s)")
+    plt.xlim(0, a_times[-1] + 1)
+    plt.legend()
+    
+    plt.tight_layout()
+    plt.show()
+    
+else:
+    print("No valid pairs found to process.")
